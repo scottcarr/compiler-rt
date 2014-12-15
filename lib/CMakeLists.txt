@@ -4,6 +4,8 @@
 include(AddCompilerRT)
 include(SanitizerUtils)
 
+add_subdirectory(DataConf)
+
 if(COMPILER_RT_HAS_SANITIZER_COMMON)
   add_subdirectory(interception)
   add_subdirectory(sanitizer_common)
