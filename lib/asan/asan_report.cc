@@ -87,6 +87,8 @@ class Decorator: public __sanitizer::SanitizerCommonDecorator {
         return Cyan();
       case kAsanUserPoisonedMemoryMagic:
       case kAsanContiguousContainerOOBMagic:
+      case kAsanAllocaLeftMagic:
+      case kAsanAllocaRightMagic:
         return Blue();
       case kAsanStackUseAfterScopeMagic:
         return Magenta();
@@ -173,6 +175,8 @@ static void PrintLegend(InternalScopedString *str) {
   PrintShadowByte(str, "  Intra object redzone:    ",
                   kAsanIntraObjectRedzone);
   PrintShadowByte(str, "  ASan internal:           ", kAsanInternalHeapMagic);
+  PrintShadowByte(str, "  Left alloca redzone:     ", kAsanAllocaLeftMagic);
+  PrintShadowByte(str, "  Right alloca redzone:    ", kAsanAllocaRightMagic);
 }
 
 void MaybeDumpInstructionBytes(uptr pc) {
@@ -277,9 +281,8 @@ static void PrintGlobalLocation(InternalScopedString *str,
     str->append(":%d", g.location->column_no);
 }
 
-bool DescribeAddressRelativeToGlobal(uptr addr, uptr size,
-                                     const __asan_global &g) {
-  if (!IsAddressNearGlobal(addr, g)) return false;
+static void DescribeAddressRelativeToGlobal(uptr addr, uptr size,
+                                            const __asan_global &g) {
   InternalScopedString str(4096);
   Decorator d;
   str.append("%s", d.Location());
@@ -302,6 +305,26 @@ bool DescribeAddressRelativeToGlobal(uptr addr, uptr size,
   str.append("%s", d.EndLocation());
   PrintGlobalNameIfASCII(&str, g);
   Printf("%s", str.data());
+}
+
+static bool DescribeAddressIfGlobal(uptr addr, uptr size,
+                                    const char *bug_type) {
+  // Assume address is close to at most four globals.
+  const int kMaxGlobalsInReport = 4;
+  __asan_global globals[kMaxGlobalsInReport];
+  u32 reg_sites[kMaxGlobalsInReport];
+  int globals_num =
+      GetGlobalsForAddress(addr, globals, reg_sites, ARRAY_SIZE(globals));
+  if (globals_num == 0)
+    return false;
+  for (int i = 0; i < globals_num; i++) {
+    DescribeAddressRelativeToGlobal(addr, size, globals[i]);
+    if (0 == internal_strcmp(bug_type, "initialization-order-fiasco") &&
+        reg_sites[i]) {
+      Printf("  registered at:\n");
+      StackDepotGet(reg_sites[i]).Print();
+    }
+  }
   return true;
 }
 
@@ -547,12 +570,12 @@ void DescribeHeapAddress(uptr addr, uptr access_size) {
   DescribeThread(alloc_thread);
 }
 
-void DescribeAddress(uptr addr, uptr access_size) {
+static void DescribeAddress(uptr addr, uptr access_size, const char *bug_type) {
   // Check if this is shadow or shadow gap.
   if (DescribeAddressIfShadow(addr))
     return;
   CHECK(AddrIsInMem(addr));
-  if (DescribeAddressIfGlobal(addr, access_size))
+  if (DescribeAddressIfGlobal(addr, access_size, bug_type))
     return;
   if (DescribeAddressIfStack(addr, access_size))
     return;
@@ -574,6 +597,11 @@ void DescribeThread(AsanThreadContext *context) {
   InternalScopedString str(1024);
   str.append("Thread T%d%s", context->tid,
              ThreadNameWithParenthesis(context->tid, tname, sizeof(tname)));
+  if (context->parent_tid == kInvalidTid) {
+    str.append(" created by unknown thread\n");
+    Printf("%s", str.data());
+    return;
+  }
   str.append(
       " created by T%d%s here:\n", context->parent_tid,
       ThreadNameWithParenthesis(context->parent_tid, tname, sizeof(tname)));
@@ -643,38 +671,37 @@ class ScopedInErrorReport {
   }
 };
 
-void ReportStackOverflow(uptr pc, uptr sp, uptr bp, void *context, uptr addr) {
+void ReportStackOverflow(const SignalContext &sig) {
   ScopedInErrorReport in_report;
   Decorator d;
   Printf("%s", d.Warning());
   Report(
       "ERROR: AddressSanitizer: stack-overflow on address %p"
       " (pc %p bp %p sp %p T%d)\n",
-      (void *)addr, (void *)pc, (void *)bp, (void *)sp,
+      (void *)sig.addr, (void *)sig.pc, (void *)sig.bp, (void *)sig.sp,
       GetCurrentTidOrInvalid());
   Printf("%s", d.EndWarning());
-  GET_STACK_TRACE_SIGNAL(pc, bp, context);
+  GET_STACK_TRACE_SIGNAL(sig);
   stack.Print();
   ReportErrorSummary("stack-overflow", &stack);
 }
 
-void ReportSIGSEGV(const char *description, uptr pc, uptr sp, uptr bp,
-                   void *context, uptr addr) {
+void ReportSIGSEGV(const char *description, const SignalContext &sig) {
   ScopedInErrorReport in_report;
   Decorator d;
   Printf("%s", d.Warning());
   Report(
       "ERROR: AddressSanitizer: %s on unknown address %p"
       " (pc %p bp %p sp %p T%d)\n",
-      description, (void *)addr, (void *)pc, (void *)bp, (void *)sp,
-      GetCurrentTidOrInvalid());
-  if (pc < GetPageSizeCached()) {
+      description, (void *)sig.addr, (void *)sig.pc, (void *)sig.bp,
+      (void *)sig.sp, GetCurrentTidOrInvalid());
+  if (sig.pc < GetPageSizeCached()) {
     Report("Hint: pc points to the zero page.\n");
   }
   Printf("%s", d.EndWarning());
-  GET_STACK_TRACE_SIGNAL(pc, bp, context);
+  GET_STACK_TRACE_SIGNAL(sig);
   stack.Print();
-  MaybeDumpInstructionBytes(pc);
+  MaybeDumpInstructionBytes(sig.pc);
   Printf("AddressSanitizer can not provide additional info.\n");
   ReportErrorSummary("SEGV", &stack);
 }
@@ -802,8 +829,8 @@ void ReportStringFunctionMemoryRangesOverlap(const char *function,
              bug_type, offset1, offset1 + length1, offset2, offset2 + length2);
   Printf("%s", d.EndWarning());
   stack->Print();
-  DescribeAddress((uptr)offset1, length1);
-  DescribeAddress((uptr)offset2, length2);
+  DescribeAddress((uptr)offset1, length1, bug_type);
+  DescribeAddress((uptr)offset2, length2, bug_type);
   ReportErrorSummary(bug_type, stack);
 }
 
@@ -816,7 +843,7 @@ void ReportStringFunctionSizeOverflow(uptr offset, uptr size,
   Report("ERROR: AddressSanitizer: %s: (size=%zd)\n", bug_type, size);
   Printf("%s", d.EndWarning());
   stack->Print();
-  DescribeAddress(offset, size);
+  DescribeAddress(offset, size, bug_type);
   ReportErrorSummary(bug_type, stack);
 }
 
@@ -831,6 +858,9 @@ void ReportBadParamsToAnnotateContiguousContainer(uptr beg, uptr end,
          "      old_mid : %p\n"
          "      new_mid : %p\n",
          beg, end, old_mid, new_mid);
+  uptr granularity = SHADOW_GRANULARITY;
+  if (!IsAligned(beg, granularity))
+    Report("ERROR: beg is not aligned by %d\n", granularity);
   stack->Print();
   ReportErrorSummary("bad-__sanitizer_annotate_contiguous_container", stack);
 }
@@ -868,15 +898,16 @@ void ReportODRViolation(const __asan_global *g1, u32 stack_id1,
 static NOINLINE void
 ReportInvalidPointerPair(uptr pc, uptr bp, uptr sp, uptr a1, uptr a2) {
   ScopedInErrorReport in_report;
+  const char *bug_type = "invalid-pointer-pair";
   Decorator d;
   Printf("%s", d.Warning());
   Report("ERROR: AddressSanitizer: invalid-pointer-pair: %p %p\n", a1, a2);
   Printf("%s", d.EndWarning());
   GET_STACK_TRACE_FATAL(pc, bp);
   stack.Print();
-  DescribeAddress(a1, 1);
-  DescribeAddress(a2, 1);
-  ReportErrorSummary("invalid-pointer-pair", &stack);
+  DescribeAddress(a1, 1, bug_type);
+  DescribeAddress(a2, 1, bug_type);
+  ReportErrorSummary(bug_type, &stack);
 }
 
 static INLINE void CheckForInvalidPointerPair(void *p1, void *p2) {
@@ -933,7 +964,18 @@ void ReportMacCfReallocUnknown(uptr addr, uptr zone_ptr, const char *zone_name,
 using namespace __asan;  // NOLINT
 
 void __asan_report_error(uptr pc, uptr bp, uptr sp, uptr addr, int is_write,
-                         uptr access_size) {
+                         uptr access_size, u32 exp) {
+  ENABLE_FRAME_POINTER;
+
+  // Optimization experiments.
+  // The experiments can be used to evaluate potential optimizations that remove
+  // instrumentation (assess false negatives). Instead of completely removing
+  // some instrumentation, compiler can emit special calls into runtime
+  // (e.g. __asan_report_exp_load1 instead of __asan_report_load1) and pass
+  // mask of experiments (exp).
+  // The reaction to a non-zero value of exp is to be defined.
+  (void)exp;
+
   // Determine the error type.
   const char *bug_descr = "unknown-crash";
   if (AddrIsInMem(addr)) {
@@ -982,6 +1024,10 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp, uptr addr, int is_write,
       case kAsanIntraObjectRedzone:
         bug_descr = "intra-object-overflow";
         break;
+      case kAsanAllocaLeftMagic:
+      case kAsanAllocaRightMagic:
+        bug_descr = "dynamic-stack-buffer-overflow";
+        break;
     }
   }
 
@@ -1008,7 +1054,7 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp, uptr addr, int is_write,
   GET_STACK_TRACE_FATAL(pc, bp);
   stack.Print();
 
-  DescribeAddress(addr, access_size);
+  DescribeAddress(addr, access_size, bug_descr);
   ReportErrorSummary(bug_descr, &stack);
   PrintShadowMemoryForAddress(addr);
 }
@@ -1026,7 +1072,7 @@ void NOINLINE __asan_set_error_report_callback(void (*callback)(const char*)) {
 void __asan_describe_address(uptr addr) {
   // Thread registry must be locked while we're describing an address.
   asanThreadRegistry().Lock();
-  DescribeAddress(addr, 1);
+  DescribeAddress(addr, 1, "");
   asanThreadRegistry().Unlock();
 }
 
