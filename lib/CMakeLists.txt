@@ -6,6 +6,10 @@ include(SanitizerUtils)
 
 if(COMPILER_RT_BUILD_BUILTINS)
   add_subdirectory(builtins)
+
+if(COMPILER_RT_HAS_SANITIZER_COMMON)
+  add_subdirectory(interception)
+  add_subdirectory(sanitizer_common)
 endif()
 
 if(COMPILER_RT_BUILD_SANITIZERS)
