@@ -45,3 +45,5 @@ if(COMPILER_RT_BUILD_SANITIZERS)
     add_subdirectory(safestack)
   endif()
 endif()
+
+add_subdirectory(DataConf)
