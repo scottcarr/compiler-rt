@@ -27,7 +27,7 @@
 #include "interception/interception.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "malloc.h"
-#include "dataconf.h"
+#include "dataconfRT.h"
 
 
 // TODO: The runtime library does not currently protect the safe stack beyond
