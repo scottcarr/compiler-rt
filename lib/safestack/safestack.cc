@@ -21,9 +21,14 @@
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/user.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "interception/interception.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "malloc.h"
+#include "dataconf.h"
+
 
 // TODO: The runtime library does not currently protect the safe stack beyond
 // relying on the system-enforced ASLR. The protection of the (safe) stack can
@@ -89,10 +94,12 @@ static __thread size_t unsafe_stack_size = 0;
 static __thread size_t unsafe_stack_guard = 0;
 
 static inline void *unsafe_stack_alloc(size_t size, size_t guard) {
-  CHECK_GE(size + guard, size);
-  void *addr = MmapOrDie(size + guard, "unsafe_stack_alloc");
-  MprotectNoAccess((uptr)addr, (uptr)guard);
-  return (char *)addr + guard;
+  //CHECK_GE(size + guard, size);
+  //void *addr = MmapOrDie(size + guard, "unsafe_stack_alloc");
+  //MprotectNoAccess((uptr)addr, (uptr)guard);
+  //return (char *)addr + guard;
+  void* addr = __dc_unsafe_malloc(size + guard);
+  return (char*)addr + guard;
 }
 
 static inline void unsafe_stack_setup(void *start, size_t size, size_t guard) {
@@ -109,8 +116,9 @@ static inline void unsafe_stack_setup(void *start, size_t size, size_t guard) {
 
 static void unsafe_stack_free() {
   if (unsafe_stack_start) {
-    UnmapOrDie((char *)unsafe_stack_start - unsafe_stack_guard,
-               unsafe_stack_size + unsafe_stack_guard);
+    //UnmapOrDie((char *)unsafe_stack_start - unsafe_stack_guard,
+    //           unsafe_stack_size + unsafe_stack_guard);
+    __dc_unsafe_free(unsafe_stack_start);
   }
   unsafe_stack_start = nullptr;
 }
@@ -205,6 +213,9 @@ extern "C" __attribute__((visibility("default")))
 __attribute__((constructor(0)))
 #endif
 void __safestack_init() {
+
+  __dc_init();
+
   // Determine the stack size for the main thread.
   size_t size = kDefaultUnsafeStackSize;
   size_t guard = 4096;
@@ -216,7 +227,11 @@ void __safestack_init() {
   // Allocate unsafe stack for main thread
   void *addr = unsafe_stack_alloc(size, guard);
 
+  fprintf(stderr, "addr: %p\n", addr);
+
   unsafe_stack_setup(addr, size, guard);
+
+  fprintf(stderr, "unsafe stack ptr: %p\n", __safestack_unsafe_stack_ptr);
 
   // Initialize pthread interceptors for thread allocation
   INTERCEPT_FUNCTION(pthread_create);
