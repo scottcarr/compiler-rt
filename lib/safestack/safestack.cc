@@ -227,11 +227,11 @@ void __safestack_init() {
   // Allocate unsafe stack for main thread
   void *addr = unsafe_stack_alloc(size, guard);
 
-  fprintf(stderr, "addr: %p\n", addr);
+  DEBUG("unsafe stack bottom addr: %p\n", addr);
 
   unsafe_stack_setup(addr, size, guard);
 
-  fprintf(stderr, "unsafe stack ptr: %p\n", __safestack_unsafe_stack_ptr);
+  DEBUG("unsafe stack ptr: %p\n", __safestack_unsafe_stack_ptr);
 
   // Initialize pthread interceptors for thread allocation
   INTERCEPT_FUNCTION(pthread_create);
