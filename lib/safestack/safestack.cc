@@ -208,10 +208,10 @@ INTERCEPTOR(int, pthread_create, pthread_t *thread,
 }
 
 extern "C" __attribute__((visibility("default")))
-#if !SANITIZER_CAN_USE_PREINIT_ARRAY
+//#if !SANITIZER_CAN_USE_PREINIT_ARRAY
 // On ELF platforms, the constructor is invoked using .preinit_array (see below)
 __attribute__((constructor(0)))
-#endif
+//#endif
 void __safestack_init() {
 
   __dc_init();
@@ -234,21 +234,24 @@ void __safestack_init() {
   DEBUG("unsafe stack ptr: %p\n", __safestack_unsafe_stack_ptr);
 
   // Initialize pthread interceptors for thread allocation
-  INTERCEPT_FUNCTION(pthread_create);
+  if (!INTERCEPT_FUNCTION(pthread_create)) {
+    fprintf(stderr, "failed to intercept pthread_create");
+    abort();
+  }
 
   // Setup the cleanup handler
   pthread_key_create(&thread_cleanup_key, thread_cleanup_handler);
 }
 
-#if SANITIZER_CAN_USE_PREINIT_ARRAY
-// On ELF platforms, run safestack initialization before any other constructors.
-// On other platforms we use the constructor attribute to arrange to run our
-// initialization early.
-extern "C" {
-__attribute__((section(".preinit_array"),
-               used)) void (*__safestack_preinit)(void) = __safestack_init;
-}
-#endif
+//#if SANITIZER_CAN_USE_PREINIT_ARRAY
+//// On ELF platforms, run safestack initialization before any other constructors.
+//// On other platforms we use the constructor attribute to arrange to run our
+//// initialization early.
+//extern "C" {
+//__attribute__((section(".preinit_array"),
+//               used)) void (*__safestack_preinit)(void) = __safestack_init;
+//}
+//#endif
 
 extern "C"
     __attribute__((visibility("default"))) void *__get_unsafe_stack_start() {
